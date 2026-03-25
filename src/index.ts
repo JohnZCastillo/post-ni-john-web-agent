@@ -1,7 +1,7 @@
 import { serve } from '@hono/node-server'
 import { Hono } from 'hono'
 import { cloneRawRequest } from 'hono/request'
-
+import { createNodeWebSocket } from '@hono/node-ws'
 import * as mongoose from "mongoose";
 import { Request } from './schema/schema.js';
 
@@ -11,11 +11,36 @@ import * as jsondiffpatch from 'jsondiffpatch';
 import { md5 } from 'js-md5';
 import { cors } from 'hono/cors'
 
+import { Server }  from "socket.io";
+import { Server as HttpServer } from 'http';
+
 dotenv.config();
 
 const app = new Hono()
 
 const port =  parseInt(process.env.PORT || '3000');
+
+const server = serve({
+  fetch: app.fetch,
+  port: port
+})
+
+const ioServer = new Server(server as HttpServer, {
+  path: '/ws',
+  serveClient: false,
+});
+
+ioServer.on("connection", (socket) => {
+ 
+  console.log("client connected");
+
+  socket.on('test', (msg) => {
+    console.log('message: ' + msg);
+  });
+
+})
+
+
 
 app.use('*', cors({origin: '*'}))
 
@@ -81,9 +106,12 @@ app.onError((error,c) => {
   return c.text('Custom Error Message', 500)
 })
 
+app.get('/test',(c)=>{
 
-serve({
-  fetch: app.fetch,
-  port: port
-}, (info) => {
+  ioServer.emit('test', 'hello');
+
+  return c.json({message: 'hi'});
+
 })
+
+
