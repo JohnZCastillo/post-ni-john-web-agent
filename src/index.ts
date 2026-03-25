@@ -4,7 +4,7 @@ import { cloneRawRequest } from 'hono/request'
 
 const app = new Hono()
 
-const port =  process.env.PORT || 3000;
+const port =  parseInt(process.env.PORT || '3000');
 
 app.all('/agent', async (c) => {
 
