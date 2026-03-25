@@ -4,6 +4,8 @@ import { cloneRawRequest } from 'hono/request'
 
 const app = new Hono()
 
+const port =  process.env.PORT || 3000;
+
 app.all('/agent', async (c) => {
 
   const targetUrl = c.req.query('targetUrl');
@@ -21,6 +23,6 @@ app.onError((error,c) => {
 
 serve({
   fetch: app.fetch,
-  port: 3000
+  port: port
 }, (info) => {
 })
