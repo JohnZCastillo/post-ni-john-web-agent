@@ -11,20 +11,75 @@ import dotenv from 'dotenv';
 import * as jsondiffpatch from 'jsondiffpatch';
 import { md5 } from 'js-md5';
 import { cors } from 'hono/cors'
-import { json } from 'stream/consumers';
 import saveRequest from './action/saveRequest.js';
+import { except } from 'hono/combine';
+import { proxy } from 'hono/proxy';
 
 dotenv.config();
 
 const app = new Hono()
 const port =  parseInt(process.env.PORT || '3000');
 
+app.use('*', except('/agent/*', cors()))
+
+// app.use('/agent/*', cors());
+
 const { injectWebSocket, upgradeWebSocket } = createNodeWebSocket({ app })
 
-app.use('*', cors({origin: '*'}))
-
-
 const clients = new Set();
+
+app.get(
+  '/ws/:workspaceId',
+  upgradeWebSocket(async (c) => {
+    
+    const {workspaceId}  = c.req.param();
+
+    await mongoose.connect(process.env.MONGO_DB_CONNECTION!);
+
+    return  {
+      onOpen(event, ws){
+
+      clients.add(ws);
+
+       Request.findOne({workspaceId: workspaceId}).then(request => {
+          ws.send(JSON.stringify({
+              content: request?.content ?? [], 
+              clientId: '', 
+              initial: true
+          })); 
+       })
+
+      },
+      onMessage(event, ws) {
+        
+        const {clientId, content} = JSON.parse(event.data);
+        
+        saveRequest({id: workspaceId, data: content}).then(res =>{
+          
+          clients.forEach(client => {
+
+            if(!client.readyState || res == null || client === ws){
+                return;
+            }
+
+            client.send(JSON.stringify({
+              clientId: clientId,
+              content: res
+            }));
+          })
+        })
+       
+      },
+      onClose(event, ws) {
+        clients.delete(ws);
+      },
+      onError(event, ws) {
+        clients.clear();
+        console.error('WebSocket error:', event);
+      }
+    }
+  })
+)
 
 app.get('/workspace', async (c) => {
 
@@ -89,68 +144,12 @@ app.get('/sync/:workspace', async (c) => {
 
 app.all('/agent', async (c) => {
 
-  const targetUrl = c.req.query('targetUrl');
+    const targetUrl = c.req.query('targetUrl');
 
-  const clonedReq = await cloneRawRequest(c.req)
-  
-  return fetch(targetUrl!, clonedReq)
-
-})
-
-app.get(
-  '/ws/:workspaceId',
-  upgradeWebSocket(async (c) => {
+    const clonedReq = await cloneRawRequest(c.req)
     
-    const {workspaceId}  = c.req.param();
-
-    await mongoose.connect(process.env.MONGO_DB_CONNECTION!);
-
-    return  {
-      onOpen(event, ws){
-
-      clients.add(ws);
-
-       Request.findOne({workspaceId: workspaceId}).then(request => {
-          ws.send(JSON.stringify({
-              content: request?.content ?? [], 
-              clientId: '', 
-              initial: true
-          })); 
-       })
-
-      },
-      onMessage(event, ws) {
-        
-        const {clientId, content} = JSON.parse(event.data);
-        
-        console.log('saving request');
-
-        saveRequest({id: workspaceId, data: content}).then(res =>{
-          
-          clients.forEach(client => {
-
-            if(!client.readyState){
-                return;
-            }
-
-            client.send(JSON.stringify({
-              clientId: clientId,
-              content: res
-            }));
-          })
-        })
-       
-      },
-      onClose(event, ws) {
-        clients.delete(ws);
-      },
-      onError(event, ws) {
-        clients.clear();
-        console.error('WebSocket error:', event);
-      }
-    }
-  })
-)
+    return fetch(targetUrl!, clonedReq)
+})
 
 app.onError((error,c) => {
   console.log(error);
@@ -160,9 +159,6 @@ app.onError((error,c) => {
 const server = serve({
   fetch: app.fetch,
   port: port
-}, (info) => {
 })
 
 injectWebSocket(server)
-
-console.log('test');

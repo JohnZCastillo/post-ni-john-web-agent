@@ -30,11 +30,11 @@ const saveRequest = async ({data, id}:  requestType) => {
 
     const delta = diffpatcher.diff(localCopy, data);
 
-    if(delta){
-        diffpatcher.patch(localCopy, delta);
+    if(!delta){
+        return  null;
     }
 
-    console.log('local copy: ', localCopy);
+    diffpatcher.patch(localCopy, delta);
 
     await Request.updateOne({workspaceId: id}, {content: localCopy});
 
