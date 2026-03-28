@@ -15,6 +15,9 @@ import { cors } from 'hono/cors'
 import saveRequest from './action/saveRequest.js';
 import { except } from 'hono/combine';
 
+import { sign, verify } from 'hono/jwt'
+import bcrypt from "bcrypt";
+
 dotenv.config();
 
 const app = new Hono()
@@ -24,20 +27,65 @@ app.use('*', except('/agent/*', cors()))
 
 const { injectWebSocket, upgradeWebSocket } = createNodeWebSocket({ app })
 
-const clients = new Set<WSContext>();
+const workspaceClients = new Map<string, Set<WSContext>>();
+
+app.post('sign', async (c) => {
+
+  const { workspace, password } = await c.req.json();
+
+  const request = await Request.findOne({ workspaceId: workspace });
+
+  if (request == null) {
+    return c.json({ message: 'Invalid username or password' }, 401);
+  }
+
+  const ok = await bcrypt.compare(password, request.password);
+
+  if (!ok) {
+    return c.json({ message: 'Invalid username or password' }, 401);
+  }
+
+  const payload = {
+    workspace,
+    exp: Math.floor(Date.now() / 1000) + 60 * 60 * 24 * 30,
+  }
+
+  const secret = process.env.JWT_SECRET;
+
+  const token = await sign(payload, secret!)
+
+  return c.json({ token });
+
+})
 
 app.get(
   '/ws/:workspaceId',
   upgradeWebSocket(async (c) => {
 
     const { workspaceId } = c.req.param();
+    const token = c.req.query('token');
 
-    await mongoose.connect(process.env.MONGO_DB_CONNECTION!);
+    // Verify JWT before upgrading
+    if (!token) {
+      return { onOpen(_event, ws) { ws.close(4001, 'Unauthorized'); } };
+    }
+
+    try {
+      const payload = await verify(token, process.env.JWT_SECRET!, 'HS256') as { workspace: string };
+      if (payload.workspace !== workspaceId) {
+        return { onOpen(_event, ws) { ws.close(4003, 'Forbidden'); } };
+      }
+    } catch {
+      return { onOpen(_event, ws) { ws.close(4001, 'Invalid token'); } };
+    }
 
     return {
-      onOpen(event, ws) {
+      onOpen(_event, ws) {
 
-        clients.add(ws);
+        if (!workspaceClients.has(workspaceId)) {
+          workspaceClients.set(workspaceId, new Set());
+        }
+        workspaceClients.get(workspaceId)!.add(ws);
 
         Request.findOne({ workspaceId: workspaceId }).then(request => {
           ws.send(JSON.stringify({
@@ -54,12 +102,13 @@ app.get(
 
         saveRequest({ id: workspaceId, data: content }).then(res => {
 
-          clients.forEach(client => {
+          const clients = workspaceClients.get(workspaceId);
+          if (!clients) return;
 
+          clients.forEach(client => {
             if (client.readyState !== 1 || res == null || client === ws) {
               return;
             }
-
             client.send(JSON.stringify({
               clientId: clientId,
               content: res
@@ -68,76 +117,45 @@ app.get(
         })
 
       },
-      onClose(event, ws) {
-        clients.delete(ws);
+      onClose(_event, ws) {
+        const clients = workspaceClients.get(workspaceId);
+        if (clients) {
+          clients.delete(ws);
+          if (clients.size === 0) workspaceClients.delete(workspaceId);
+        }
       },
-      onError(event, ws) {
-        clients.clear();
-        console.error('WebSocket error:', event);
+      onError(_event, _ws) {
+        workspaceClients.delete(workspaceId);
+        console.error(`WebSocket error in workspace: ${workspaceId}`);
       }
     }
   })
 )
 
-app.get('/workspace', async (c) => {
+app.post('/workspace', async (c) => {
 
-  const { workspace } = c.req.query();
+  const { workspace, password } = await c.req.json();
 
-  await mongoose.connect(process.env.MONGO_DB_CONNECTION!);
+  console.log(password, process.env.SALT_ROUNDS);
 
-  const request = await Request.insertOne({
+  const hashed = await bcrypt.hash(password, parseInt(process.env.SALT_ROUNDS!));
+
+  await Request.insertOne({
     workspaceId: workspace,
+    password: hashed,
     content: []
   });
 
-  return c.json(request);
-})
-
-app.post('/sync/:workspace', async (c) => {
-
-  const { workspace } = c.req.param();
-  const { content } = await c.req.json();
-
-  await mongoose.connect(process.env.MONGO_DB_CONNECTION!);
-
-  const request = await Request.findOne({ workspaceId: workspace });
-
-  if (request == null) {
-    throw new Error('Workspace not found');
+  const payload = {
+    workspace,
+    exp: Math.floor(Date.now() / 1000) + 60 * 60 * 24 * 30,
   }
 
-  const diffpatcher = jsondiffpatch.create({
-    objectHash: function (obj: any) {
-      let decorated: { id: string } = obj;
-      return decorated.id;
-    },
-  });
+  const secret = process.env.JWT_SECRET;
 
-  const delta = diffpatcher.diff(request.content, content);
+  const token = await sign(payload, secret!)
 
-  if (delta) {
-    jsondiffpatch.patch(request.content, delta);
-    request.markModified("content");
-    await request.save();
-  }
-
-  return c.json(request);
-
-})
-
-app.get('/sync/:workspace', async (c) => {
-
-  const { workspace } = c.req.param();
-
-  await mongoose.connect(process.env.MONGO_DB_CONNECTION!);
-
-  const request = await Request.findOne({ workspaceId: workspace });
-
-  if (request == null) {
-    return c.json({ message: 'workspace not found' }, 404);
-  }
-
-  return c.json({ data: request.content, hash: md5(JSON.stringify(request.content)) });
+  return c.json({ token, workspace });
 })
 
 app.all('/agent', async (c) => {
@@ -154,9 +172,12 @@ app.onError((error, c) => {
   return c.text('Custom Error Message', 500)
 })
 
-const server = serve({
-  fetch: app.fetch,
-  port: port
-})
-
-injectWebSocket(server)
+mongoose.connect(process.env.MONGO_DB_CONNECTION!).then(() => {
+  console.log('MongoDB connected');
+  const server = serve({
+    fetch: app.fetch,
+    port: port
+  });
+  injectWebSocket(server);
+  console.log(`Server running on port ${port}`);
+});

@@ -2,8 +2,9 @@ import * as mongoose from "mongoose";
 
 const requestSchema = new mongoose.Schema(
   {
-    workspaceId: { type: String, required: true },
-    content: {type: Object, required: true}
+    workspaceId: { type: String, required: true, unique: true },
+    content: { type: Object, required: true },
+    password: { type: String, required: true }
   },
 );
 
